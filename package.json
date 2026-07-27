@@ -1,0 +1,30 @@
+{
+  "name": "telegram-reaction-bot",
+  "version": "1.0.0",
+  "description": "یک ربات تلگرام برای اضافه کردن ری‌اکشن خودکار به پیام‌ها",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "dev": "nodemon bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "reaction",
+    "emoji",
+    "auto-reaction"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "telegraf": "^4.15.0",
+    "dotenv": "^16.3.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
