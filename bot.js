@@ -246,34 +246,51 @@ function statusText() {
   );
 }
 
+// ==================== دکمه‌های رنگی (Bot API 9.4+) ====================
+// از نسخه‌ی Bot API 9.4 به بعد، هر دکمه‌ی inline می‌تواند فیلد style
+// بگیرد: 'primary' (آبی)، 'success' (سبز)، 'danger' (قرمز).
+// چون wrapper سطح‌بالای Markup.button.callback ممکن است این فیلد جدید
+// را نشناسد، دکمه را به شکل خام آبجکت Bot API می‌سازیم تا مطمئن باشیم
+// style درست ارسال می‌شود؛ خروجی نهایی همان چیزی‌ست که Telegram API
+// انتظار دارد: { text, callback_data, style }.
+function styledButton(text, callback_data, style) {
+  const btn = { text, callback_data };
+  if (style) btn.style = style; // 'primary' | 'success' | 'danger'
+  return btn;
+}
+
 function mainMenuKeyboard() {
-  return Markup.inlineKeyboard([
+  const rows = [
     [
-      Markup.button.callback(
-        config.enabled ? '🔴 غیرفعال کردن ربات' : '🟢 فعال کردن ربات',
-        'toggle_enabled'
+      styledButton(
+        config.enabled ? '⏸ غیرفعال کردن ربات' : '▶️ فعال کردن ربات',
+        'toggle_enabled',
+        config.enabled ? 'danger' : 'success'
       ),
     ],
     [
-      Markup.button.callback(
-        config.reactChannelPosts ? '🟠 خاموش کردن ری‌اکشن کانال' : '🔵 روشن کردن ری‌اکشن کانال',
-        'toggle_channel'
+      styledButton(
+        config.reactChannelPosts ? '📴 خاموش کردن ری‌اکشن کانال' : '📡 روشن کردن ری‌اکشن کانال',
+        'toggle_channel',
+        config.reactChannelPosts ? 'danger' : 'success'
       ),
     ],
     [
-      Markup.button.callback('🟣 تنظیم Rate Limit', 'set_ratelimit'),
-      Markup.button.callback('🟡 لیست مستثنی‌ها', 'ignore_list'),
+      styledButton('⏱ تنظیم Rate Limit', 'set_ratelimit', 'primary'),
+      styledButton('🚫 لیست مستثنی‌ها', 'ignore_list', 'primary'),
     ],
     [
-      Markup.button.callback(
-        config.useHelperBots ? '🟤 خاموش کردن ربات‌های کمکی' : '🟢 روشن کردن ربات‌های کمکی',
-        'toggle_helpers'
+      styledButton(
+        config.useHelperBots ? '🤖 خاموش کردن ربات‌های کمکی' : '🤖 روشن کردن ربات‌های کمکی',
+        'toggle_helpers',
+        config.useHelperBots ? 'danger' : 'success'
       ),
-      Markup.button.callback('🔷 لیست ربات‌های کمکی', 'bots_list'),
+      styledButton('📋 لیست ربات‌های کمکی', 'bots_list', 'primary'),
     ],
-    [Markup.button.callback('⚪️ تنظیم سقف ربات‌های کمکی', 'set_helpercap')],
-    [Markup.button.callback('🔄 بروزرسانی وضعیت', 'refresh_status')],
-  ]);
+    [styledButton('🎚 تنظیم سقف ربات‌های کمکی', 'set_helpercap', 'primary')],
+    [styledButton('🔄 بروزرسانی وضعیت', 'refresh_status', 'primary')],
+  ];
+  return { reply_markup: { inline_keyboard: rows } };
 }
 
 async function sendAdminPanel(ctx) {
@@ -559,18 +576,16 @@ bot.action('set_helpercap', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
   await ctx.answerCbQuery();
   await ctx.reply(
-    `⚪️ سقف فعلی: ${helperBots.maxConcurrent ? helperBots.maxConcurrent + ' ربات هم‌زمان' : 'بدون سقف'}\n\nیک گزینه انتخاب کن:`,
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback('🔹 ۲ ربات', 'hc_2'),
-        Markup.button.callback('🔸 ۵ ربات', 'hc_5'),
-      ],
-      [
-        Markup.button.callback('🔶 ۱۰ ربات', 'hc_10'),
-        Markup.button.callback('⭐️ بدون سقف', 'hc_0'),
-      ],
-      [Markup.button.callback('« بازگشت به پنل', 'refresh_status')],
-    ])
+    `🎚 سقف فعلی: ${helperBots.maxConcurrent ? helperBots.maxConcurrent + ' ربات هم‌زمان' : 'بدون سقف'}\n\nیک گزینه انتخاب کن:`,
+    {
+      reply_markup: {
+        inline_keyboard: [
+          [styledButton('۲ ربات', 'hc_2', 'primary'), styledButton('۵ ربات', 'hc_5', 'primary')],
+          [styledButton('۱۰ ربات', 'hc_10', 'primary'), styledButton('بدون سقف', 'hc_0', 'danger')],
+          [styledButton('« بازگشت به پنل', 'refresh_status', 'primary')],
+        ],
+      },
+    }
   );
 });
 
@@ -605,20 +620,21 @@ bot.action('ignore_list', async (ctx) => {
 bot.action('set_ratelimit', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
   await ctx.answerCbQuery();
-  await ctx.reply(
-    '⏱ یک گزینه را انتخاب کنید (تعداد ری‌اکشن مجاز در بازه):',
-    Markup.inlineKeyboard([
-      [
-        Markup.button.callback('۳ در ۱۰ ثانیه', 'rl_3_10'),
-        Markup.button.callback('۵ در ۱۰ ثانیه', 'rl_5_10'),
+  await ctx.reply('⏱ یک گزینه را انتخاب کنید (تعداد ری‌اکشن مجاز در بازه):', {
+    reply_markup: {
+      inline_keyboard: [
+        [
+          styledButton('۳ در ۱۰ ثانیه', 'rl_3_10', 'primary'),
+          styledButton('۵ در ۱۰ ثانیه', 'rl_5_10', 'primary'),
+        ],
+        [
+          styledButton('۱۰ در ۶۰ ثانیه', 'rl_10_60', 'primary'),
+          styledButton('۲۰ در ۶۰ ثانیه', 'rl_20_60', 'primary'),
+        ],
+        [styledButton('« بازگشت به پنل', 'refresh_status', 'primary')],
       ],
-      [
-        Markup.button.callback('۱۰ در ۶۰ ثانیه', 'rl_10_60'),
-        Markup.button.callback('۲۰ در ۶۰ ثانیه', 'rl_20_60'),
-      ],
-      [Markup.button.callback('« بازگشت به پنل', 'refresh_status')],
-    ])
-  );
+    },
+  });
 });
 
 bot.action(/^rl_(\d+)_(\d+)$/, async (ctx) => {
