@@ -314,6 +314,13 @@ bot.command('myid', async (ctx) => {
   await ctx.reply(`آی‌دی شما: ${ctx.from.id}`);
 });
 
+// دستور تست ساده و بدون هیچ منطق اضافه — برای اطمینان از این‌که مسیر
+// دستورات اصلاً به bot می‌رسد (اگر این هم جواب نداد، مشکل از سطح
+// شبکه/توکن/پولینگ است، نه منطق برنامه)
+bot.command('ping', async (ctx) => {
+  await ctx.reply('pong ✅');
+});
+
 bot.command('status', async (ctx) => {
   await ctx.reply(statusText(), { parse_mode: 'Markdown' });
 });
@@ -506,6 +513,12 @@ bot.action(/^rl_(\d+)_(\d+)$/, async (ctx) => {
 
 bot.on('message', async (ctx) => {
   try {
+    // اگر پیام یک دستور است (با / شروع می‌شود)، هرگز به آن ری‌اکشن نزن.
+    // این هم از تداخل با هندلرهای bot.command جلوگیری می‌کند و هم
+    // منطقی‌تر است (به دستورات ادمین نباید ری‌اکشن زد).
+    const rawText = ctx.message.text || '';
+    if (rawText.startsWith('/')) return;
+
     await handleReactable(
       ctx,
       ctx.message,
@@ -527,6 +540,13 @@ bot.on('channel_post', async (ctx) => {
 });
 
 // ==================== راه‌اندازی و خاموشی امن ====================
+
+// گرفتن هر خطایی که در هندلرها رخ دهد و در ترمینال نمایش آن — بدون این
+// خطاهای داخل هندلرهای async ممکن است بی‌صدا بلعیده شوند.
+bot.catch((err, ctx) => {
+  console.error(`❌ خطای مدیریت‌نشده در آپدیت نوع ${ctx.updateType}:`, err.message);
+});
+
 bot.launch();
 console.log('🤖 ربات شروع شد!');
 console.log(`   حالت: ${config.enabled ? 'فعال' : 'غیرفعال'}`);
