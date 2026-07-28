@@ -1,35 +1,45 @@
 /**
- * ربات ری‌اکشن هوشمند (نسخه ارتقایافته)
- * ------------------------------------
+ * ربات ری‌اکشن هوشمند تلگرام (نسخه نهایی)
+ * ----------------------------------------
  * قابلیت‌ها:
  *  - تشخیص نوع پیام با اولویت‌بندی و پشتیبانی از چند دسته هم‌زمان
  *  - ذخیره تنظیمات در فایل JSON (پایدار بین اجراها)
  *  - Rate limit به ازای هر کاربر
  *  - مدیریت خطای ری‌اکشن (ری‌اکشن نامعتبر، عدم پشتیبانی، ...)
- *  - دستورات ادمین برای مدیریت لیست کاربران مستثنی
+ *  - پنل مدیریت با دکمه‌های شیشه‌ای (inline keyboard) مخصوص ادمین
  *  - پشتیبانی کامل از پیام‌های کانال (channel_post) در کنار چت/گروه
+ *  - آی‌دی ادمین از طریق .env (ADMIN_IDS) تنظیم می‌شود
+ *
+ * نکته مهم: دستورات (/start ,/status و ...) باید قبل از bot.on('message')
+ * ثبت بشن، وگرنه هندلر عمومی message همه‌چیز از جمله دستورات رو می‌قاپد
+ * و فقط ری‌اکشن می‌زند بدون این‌که جوابی داده بشود.
  */
 
 const fs = require('fs');
 const path = require('path');
-const { Telegraf } = require('telegraf');
+const { Telegraf, Markup } = require('telegraf');
 require('dotenv').config();
 
 // ==================== مسیرها ====================
 const CONFIG_PATH = path.join(__dirname, 'config.json');
 
+// ==================== خواندن آی‌دی ادمین از .env ====================
+// در .env بگذارید: ADMIN_IDS=123456789,987654321
+const envAdminIds = (process.env.ADMIN_IDS || '')
+  .split(',')
+  .map((s) => Number(s.trim()))
+  .filter((n) => Number.isFinite(n) && n !== 0);
+
 // ==================== تنظیمات پیش‌فرض ====================
 const DEFAULT_CONFIG = {
   enabled: true,
   delayMs: 0,
-  maxReactions: 1,
-  ignoreUsers: [],       // آی‌دی کاربران مستثنی (برای پیام‌های چت/گروه)
-  adminIds: [],          // آی‌دی ادمین‌هایی که مجاز به اجرای دستورات مدیریتی هستند
+  ignoreUsers: [],
   rateLimit: {
-    windowMs: 10000,     // بازه زمانی (میلی‌ثانیه)
-    maxPerWindow: 5,     // حداکثر تعداد ری‌اکشن مجاز در بازه، برای هر کاربر
+    windowMs: 10000,
+    maxPerWindow: 5,
   },
-  reactChannelPosts: true, // آیا به پست‌های کانال هم ری‌اکشن بزند
+  reactChannelPosts: true,
 };
 
 // ==================== مدیریت Config پایدار ====================
@@ -38,7 +48,6 @@ function loadConfig() {
     if (fs.existsSync(CONFIG_PATH)) {
       const raw = fs.readFileSync(CONFIG_PATH, 'utf-8');
       const parsed = JSON.parse(raw);
-      // ادغام با پیش‌فرض‌ها تا فیلدهای جدید هم موجود باشن
       return {
         ...DEFAULT_CONFIG,
         ...parsed,
@@ -60,14 +69,14 @@ function saveConfig(cfg) {
 }
 
 let config = loadConfig();
-// اگر فایل وجود نداشت، همین اول بسازیمش
 if (!fs.existsSync(CONFIG_PATH)) saveConfig(config);
 
+// آی‌دی ادمین‌ها همیشه از .env می‌آید (منبع واحد و امن‌تر از فایل JSON قابل‌ویرایش)
+function isAdmin(userId) {
+  return envAdminIds.includes(userId);
+}
+
 // ==================== دسته‌بندی و الگوهای پیام ====================
-// ترتیب این آرایه = اولویت تشخیص (اولی بالاترین اولویت)
-// هر دسته می‌تواند هم‌زمان با بقیه تشخیص داده شود؛ اما برای انتخاب نهایی emoji
-// از دسته با بالاترین اولویت که match شده استفاده می‌کنیم مگر اینکه چند دسته
-// با اهمیت نزدیک هم‌زمان match بشن که در آن صورت به‌صورت تصادفی وزن‌دار انتخاب می‌شود.
 const CATEGORY_PATTERNS = [
   { name: 'thanks', regex: /ممنون|تشکر|مرسی|سپاس|قربونت|دمت گرم/i, weight: 5 },
   { name: 'love', regex: /دوست دارم|عشق|محبت|دلم|عزیزم|❤/i, weight: 5 },
@@ -87,10 +96,6 @@ const reactions = {
   default: ['👍', '❤️', '🔥', '👏', '😊'],
 };
 
-/**
- * تشخیص همه دسته‌های match شده در متن، مرتب‌شده بر اساس اولویت.
- * خروجی: آرایه‌ای از نام دسته‌ها (می‌تواند خالی باشد).
- */
 function detectCategories(text) {
   if (!text) return [];
   const matched = [];
@@ -100,10 +105,6 @@ function detectCategories(text) {
   return matched;
 }
 
-/**
- * انتخاب نهایی دسته: اگر چند دسته match شدن، بر اساس وزن (تصادفی وزن‌دار) انتخاب می‌کنیم.
- * اگر هیچ دسته‌ای match نشد، 'default' برمی‌گردد.
- */
 function pickCategory(text) {
   const matched = detectCategories(text);
   if (matched.length === 0) return 'default';
@@ -124,7 +125,6 @@ function pickEmoji(category) {
 }
 
 // ==================== Rate Limiting ====================
-// نگاشت userId -> آرایه‌ی timestamp های ری‌اکشن‌های اخیر
 const userReactionLog = new Map();
 
 function isRateLimited(userId) {
@@ -145,7 +145,6 @@ function isRateLimited(userId) {
   return false;
 }
 
-// پاکسازی دوره‌ای حافظه rate limit برای جلوگیری از نشت حافظه
 setInterval(() => {
   const now = Date.now();
   const { windowMs } = config.rateLimit;
@@ -161,20 +160,13 @@ if (!process.env.BOT_TOKEN) {
   console.error('❌ متغیر محیطی BOT_TOKEN تنظیم نشده است. آن را در فایل .env قرار دهید.');
   process.exit(1);
 }
+if (envAdminIds.length === 0) {
+  console.warn('⚠️ هیچ ADMIN_IDS در .env تنظیم نشده — پنل مدیریت برای هیچ‌کس در دسترس نخواهد بود.');
+  console.warn('   برای گرفتن آی‌دی خودتان، ربات را استارت کنید و دستور /myid را بزنید.');
+}
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
 
-function isAdmin(userId) {
-  return config.adminIds.includes(userId);
-}
-
-/**
- * تلاش برای ری‌اکشن با مدیریت خطای مخصوص:
- * - اگر ایموجی مجاز نبود (تلگرام لیست محدودی از ایموجی‌های ری‌اکشن را می‌پذیرد)
- *   با یک ایموجی fallback امن دوباره تلاش می‌کند.
- * - اگر متد react اصلاً پشتیبانی نشود (نسخه قدیمی API / نوع چت نامعتبر) خطا را
- *   لاگ می‌کند بدون کرش کردن کل پردازش پیام.
- */
 const SAFE_FALLBACK_EMOJI = '👍';
 
 async function safeReact(ctx, emoji) {
@@ -184,7 +176,6 @@ async function safeReact(ctx, emoji) {
   } catch (err) {
     const desc = err?.response?.description || err.message || '';
 
-    // ایموجی نامعتبر/غیرمجاز برای ری‌اکشن
     if (/REACTION_INVALID|invalid reaction/i.test(desc)) {
       try {
         await ctx.react(SAFE_FALLBACK_EMOJI);
@@ -195,7 +186,6 @@ async function safeReact(ctx, emoji) {
       }
     }
 
-    // متد react پشتیبانی نمی‌شود (مثلاً نوع chat نامعتبر یا نسخه API قدیمی)
     if (typeof ctx.react !== 'function' || /REACTIONS_.*NOT_ALLOWED|not supported/i.test(desc)) {
       console.error('❌ ری‌اکشن در این چت/پیام پشتیبانی نمی‌شود:', desc || err.message);
       return false;
@@ -206,13 +196,9 @@ async function safeReact(ctx, emoji) {
   }
 }
 
-/**
- * پردازش مشترک برای پیام معمولی و پیام کانال
- */
 async function handleReactable(ctx, message, fromId, fromLabel) {
   if (!config.enabled) return;
 
-  // فقط برای پیام‌های چت/گروه (fromId موجود) محدودیت‌های کاربر را چک می‌کنیم
   if (fromId !== null) {
     if (config.ignoreUsers.includes(fromId)) return;
     if (isRateLimited(fromId)) {
@@ -236,7 +222,187 @@ async function handleReactable(ctx, message, fromId, fromLabel) {
   }
 }
 
-// پیام‌های عادی (چت خصوصی / گروه)
+// ==================== پنل مدیریت شیشه‌ای ====================
+function statusText() {
+  return (
+    `📊 *وضعیت ربات*\n\n` +
+    `فعال بودن: ${config.enabled ? '✅ فعال' : '❌ غیرفعال'}\n` +
+    `ری‌اکشن به کانال: ${config.reactChannelPosts ? '✅ فعال' : '❌ غیرفعال'}\n` +
+    `Rate limit: ${config.rateLimit.maxPerWindow} ری‌اکشن هر ${config.rateLimit.windowMs / 1000} ثانیه\n` +
+    `کاربران مستثنی: ${config.ignoreUsers.length} نفر`
+  );
+}
+
+function mainMenuKeyboard() {
+  return Markup.inlineKeyboard([
+    [
+      Markup.button.callback(config.enabled ? '⏸ غیرفعال کردن ربات' : '▶️ فعال کردن ربات', 'toggle_enabled'),
+    ],
+    [
+      Markup.button.callback(
+        config.reactChannelPosts ? '📴 خاموش کردن ری‌اکشن کانال' : '📡 روشن کردن ری‌اکشن کانال',
+        'toggle_channel'
+      ),
+    ],
+    [
+      Markup.button.callback('⏱ تنظیم Rate Limit', 'set_ratelimit'),
+      Markup.button.callback('🚫 لیست مستثنی‌ها', 'ignore_list'),
+    ],
+    [Markup.button.callback('🔄 بروزرسانی وضعیت', 'refresh_status')],
+  ]);
+}
+
+async function sendAdminPanel(ctx) {
+  await ctx.reply(statusText(), {
+    parse_mode: 'Markdown',
+    ...mainMenuKeyboard(),
+  });
+}
+
+async function editAdminPanel(ctx) {
+  try {
+    await ctx.editMessageText(statusText(), {
+      parse_mode: 'Markdown',
+      ...mainMenuKeyboard(),
+    });
+  } catch (err) {
+    // اگر متن تغییری نکرده بود تلگرام خطا می‌دهد؛ بی‌خطر است
+    if (!/message is not modified/i.test(err.description || err.message || '')) {
+      console.error('❌ خطا در ویرایش پنل:', err.message);
+    }
+  }
+}
+
+function requireAdminCtx(ctx) {
+  const userId = ctx.from?.id;
+  if (!userId || !isAdmin(userId)) {
+    return false;
+  }
+  return true;
+}
+
+// ==================== دستورات (باید قبل از bot.on('message') ثبت شوند) ====================
+
+bot.command('start', async (ctx) => {
+  await ctx.reply(
+    '🤖 سلام! من یک ربات ری‌اکشن خودکار هستم.\n' +
+      'هر پیامی که در چت یا کانال ارسال بشه (اگه ادمین کانال باشم) یک ری‌اکشن دریافت می‌کنه!\n\n' +
+      'برای دیدن آی‌دی عددی خودتان: /myid'
+  );
+});
+
+bot.command('myid', async (ctx) => {
+  await ctx.reply(`آی‌دی شما: ${ctx.from.id}`);
+});
+
+bot.command('status', async (ctx) => {
+  await ctx.reply(statusText(), { parse_mode: 'Markdown' });
+});
+
+// پنل مدیریت با دکمه‌های شیشه‌ای — فقط ادمین
+bot.command('panel', async (ctx) => {
+  if (!requireAdminCtx(ctx)) {
+    return ctx.reply('⛔️ این دستور فقط برای ادمین در دسترس است.');
+  }
+  await sendAdminPanel(ctx);
+});
+
+// افزودن/حذف کاربر مستثنی هنوز از طریق دستور متنی (برای وارد کردن آی‌دی دلخواه)
+bot.command('ignore', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  const parts = ctx.message.text.split(/\s+/);
+  const targetId = Number(parts[1]);
+  if (!targetId) return ctx.reply('استفاده صحیح: /ignore <user_id>');
+  if (!config.ignoreUsers.includes(targetId)) {
+    config.ignoreUsers.push(targetId);
+    saveConfig(config);
+  }
+  await ctx.reply(`✅ کاربر ${targetId} به لیست مستثنی اضافه شد.`);
+});
+
+bot.command('unignore', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  const parts = ctx.message.text.split(/\s+/);
+  const targetId = Number(parts[1]);
+  if (!targetId) return ctx.reply('استفاده صحیح: /unignore <user_id>');
+  config.ignoreUsers = config.ignoreUsers.filter((id) => id !== targetId);
+  saveConfig(config);
+  await ctx.reply(`✅ کاربر ${targetId} از لیست مستثنی حذف شد.`);
+});
+
+// ==================== اکشن‌های دکمه‌های شیشه‌ای ====================
+
+bot.action('toggle_enabled', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  config.enabled = !config.enabled;
+  saveConfig(config);
+  await ctx.answerCbQuery(config.enabled ? '✅ ربات فعال شد' : '⏸ ربات غیرفعال شد');
+  await editAdminPanel(ctx);
+});
+
+bot.action('toggle_channel', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  config.reactChannelPosts = !config.reactChannelPosts;
+  saveConfig(config);
+  await ctx.answerCbQuery(config.reactChannelPosts ? '📡 روشن شد' : '📴 خاموش شد');
+  await editAdminPanel(ctx);
+});
+
+bot.action('refresh_status', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  await ctx.answerCbQuery('🔄 بروز شد');
+  await editAdminPanel(ctx);
+});
+
+bot.action('ignore_list', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  await ctx.answerCbQuery();
+  const list =
+    config.ignoreUsers.length === 0
+      ? 'خالی است.'
+      : config.ignoreUsers.map((id) => `• ${id}`).join('\n');
+  await ctx.reply(
+    `🚫 *کاربران مستثنی*\n\n${list}\n\n` +
+      'برای افزودن: `/ignore user_id`\n' +
+      'برای حذف: `/unignore user_id`',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+// جریان ساده برای تنظیم rate limit با دکمه‌های عدد ثابت (بدون نیاز به state پیچیده)
+bot.action('set_ratelimit', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    '⏱ یک گزینه را انتخاب کنید (تعداد ری‌اکشن مجاز در بازه):',
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('۳ در ۱۰ ثانیه', 'rl_3_10'),
+        Markup.button.callback('۵ در ۱۰ ثانیه', 'rl_5_10'),
+      ],
+      [
+        Markup.button.callback('۱۰ در ۶۰ ثانیه', 'rl_10_60'),
+        Markup.button.callback('۲۰ در ۶۰ ثانیه', 'rl_20_60'),
+      ],
+      [Markup.button.callback('« بازگشت به پنل', 'refresh_status')],
+    ])
+  );
+});
+
+bot.action(/^rl_(\d+)_(\d+)$/, async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  const max = Number(ctx.match[1]);
+  const seconds = Number(ctx.match[2]);
+  config.rateLimit.maxPerWindow = max;
+  config.rateLimit.windowMs = seconds * 1000;
+  saveConfig(config);
+  await ctx.answerCbQuery(`✅ تنظیم شد: ${max} در ${seconds} ثانیه`);
+  await ctx.deleteMessage().catch(() => {});
+  await sendAdminPanel(ctx);
+});
+
+// ==================== هندلرهای عمومی پیام (بعد از دستورات ثبت می‌شوند) ====================
+
 bot.on('message', async (ctx) => {
   try {
     await handleReactable(
@@ -250,130 +416,13 @@ bot.on('message', async (ctx) => {
   }
 });
 
-// پست‌های کانال (وقتی ربات ادمین کانال باشد)
 bot.on('channel_post', async (ctx) => {
   try {
     if (!config.reactChannelPosts) return;
-    // در پست‌های کانال معمولاً ctx.from وجود ندارد (پیام از طرف خود کانال است)
     await handleReactable(ctx, ctx.channelPost, null, `کانال:${ctx.chat?.title || ctx.chat?.id}`);
   } catch (error) {
     console.error('❌ خطا در پردازش پست کانال:', error.message);
   }
-});
-
-// ==================== دستورات عمومی ====================
-bot.command('start', (ctx) => {
-  ctx.reply(
-    '🤖 سلام! من یک ربات ری‌اکشن خودکار هستم.\n' +
-      'هر پیامی که در چت یا کانال ارسال بشه (اگه ادمین کانال باشم) یک ری‌اکشن دریافت می‌کنه!'
-  );
-});
-
-bot.command('status', (ctx) => {
-  const status = config.enabled ? '✅ فعال' : '❌ غیرفعال';
-  ctx.reply(
-    `وضعیت: ${status}\n` +
-      `ری‌اکشن به پست‌های کانال: ${config.reactChannelPosts ? '✅' : '❌'}\n` +
-      `Rate limit: ${config.rateLimit.maxPerWindow} ری‌اکشن هر ${config.rateLimit.windowMs / 1000} ثانیه\n` +
-      `تعداد کاربران مستثنی: ${config.ignoreUsers.length}`
-  );
-});
-
-// ==================== دستورات ادمین ====================
-// توجه: اولین بار باید آی‌دی خودتان را دستی به adminIds در config.json اضافه کنید
-// یا اگر لیست ادمین خالی باشد، به‌صورت پیش‌فرض همه اجازه دارند (برای راحتی تست).
-
-function requireAdmin(ctx) {
-  if (config.adminIds.length === 0) return true; // هنوز ادمینی تنظیم نشده -> باز است
-  if (isAdmin(ctx.from.id)) return true;
-  ctx.reply('⛔️ فقط ادمین می‌تواند این دستور را اجرا کند.');
-  return false;
-}
-
-bot.command('toggle', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  config.enabled = !config.enabled;
-  saveConfig(config);
-  ctx.reply(`ربات ${config.enabled ? '✅ فعال' : '❌ غیرفعال'} شد.`);
-});
-
-bot.command('togglechannel', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  config.reactChannelPosts = !config.reactChannelPosts;
-  saveConfig(config);
-  ctx.reply(`ری‌اکشن به پست‌های کانال ${config.reactChannelPosts ? '✅ فعال' : '❌ غیرفعال'} شد.`);
-});
-
-// افزودن کاربر به لیست مستثنی: /ignore 123456789
-bot.command('ignore', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const targetId = Number(parts[1]);
-  if (!targetId) {
-    return ctx.reply('استفاده صحیح: /ignore <user_id>');
-  }
-  if (!config.ignoreUsers.includes(targetId)) {
-    config.ignoreUsers.push(targetId);
-    saveConfig(config);
-  }
-  ctx.reply(`✅ کاربر ${targetId} به لیست مستثنی اضافه شد.`);
-});
-
-// حذف کاربر از لیست مستثنی: /unignore 123456789
-bot.command('unignore', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const targetId = Number(parts[1]);
-  if (!targetId) {
-    return ctx.reply('استفاده صحیح: /unignore <user_id>');
-  }
-  config.ignoreUsers = config.ignoreUsers.filter((id) => id !== targetId);
-  saveConfig(config);
-  ctx.reply(`✅ کاربر ${targetId} از لیست مستثنی حذف شد.`);
-});
-
-// نمایش لیست کاربران مستثنی
-bot.command('ignorelist', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  if (config.ignoreUsers.length === 0) {
-    return ctx.reply('لیست کاربران مستثنی خالی است.');
-  }
-  ctx.reply('کاربران مستثنی:\n' + config.ignoreUsers.join('\n'));
-});
-
-// افزودن ادمین جدید: /addadmin 123456789
-bot.command('addadmin', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const targetId = Number(parts[1]);
-  if (!targetId) {
-    return ctx.reply('استفاده صحیح: /addadmin <user_id>');
-  }
-  if (!config.adminIds.includes(targetId)) {
-    config.adminIds.push(targetId);
-    saveConfig(config);
-  }
-  ctx.reply(`✅ کاربر ${targetId} به لیست ادمین‌ها اضافه شد.`);
-});
-
-// تنظیم rate limit: /setratelimit <maxPerWindow> <windowSeconds>
-bot.command('setratelimit', (ctx) => {
-  if (!requireAdmin(ctx)) return;
-  const parts = ctx.message.text.split(/\s+/);
-  const maxPerWindow = Number(parts[1]);
-  const windowSeconds = Number(parts[2]);
-  if (!maxPerWindow || !windowSeconds) {
-    return ctx.reply('استفاده صحیح: /setratelimit <تعداد_مجاز> <بازه_به_ثانیه>');
-  }
-  config.rateLimit.maxPerWindow = maxPerWindow;
-  config.rateLimit.windowMs = windowSeconds * 1000;
-  saveConfig(config);
-  ctx.reply(`✅ Rate limit تنظیم شد: ${maxPerWindow} ری‌اکشن هر ${windowSeconds} ثانیه.`);
-});
-
-// نمایش آی‌دی خودتان (برای اضافه کردن به adminIds در اولین راه‌اندازی)
-bot.command('myid', (ctx) => {
-  ctx.reply(`آی‌دی شما: ${ctx.from.id}`);
 });
 
 // ==================== راه‌اندازی و خاموشی امن ====================
@@ -381,6 +430,7 @@ bot.launch();
 console.log('🤖 ربات شروع شد!');
 console.log(`   حالت: ${config.enabled ? 'فعال' : 'غیرفعال'}`);
 console.log(`   ری‌اکشن به کانال: ${config.reactChannelPosts ? 'فعال' : 'غیرفعال'}`);
+console.log(`   ادمین‌ها: ${envAdminIds.length > 0 ? envAdminIds.join(', ') : '(تنظیم نشده)'}`);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
