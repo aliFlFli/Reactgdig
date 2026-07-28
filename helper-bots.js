@@ -8,10 +8,10 @@
  * نکات امنیتی/محدودیتی که رعایت شده:
  *  - هر ربات کمکی باید *خودش* در کانال ادمین باشه وگرنه ری‌اکشنش
  *    silently fail می‌شه (خطا لاگ می‌شه ولی کرش نمی‌کنه).
- *  - حداکثر تعداد ربات کمکی که هم‌زمان روی یک پیام ری‌اکشن می‌زنن
- *    محدود شده (MAX_CONCURRENT_HELPERS) تا رفتار مثل بمباران ری‌اکشن
- *    به نظر نرسه و ریسک بن شدن کم بشه.
- *  - بین ری‌اکشن هر ربات کمکی یک تاخیر تصادفی کوچک گذاشته شده.
+ *  - تعداد ربات کمکی که هم‌زمان روی یک پیام ری‌اکشن می‌زنن با
+ *    maxConcurrent قابل تنظیمه (پیش‌فرض: بدون سقف، همه‌ی ربات‌های فعال).
+ *  - بین ری‌اکشن هر ربات کمکی یک تاخیر تصادفی کوچک گذاشته شده تا کمی
+ *    طبیعی‌تر به نظر برسه (نه این‌که تضمینی در برابر تشخیص اسپم بده).
  *  - توکن‌ها در فایل جدا (bots.json) نگه داشته می‌شن، نه در config.json
  *    عمومی، تا مدیریتش تمیزتر باشه.
  */
@@ -22,11 +22,15 @@ const { Telegraf } = require('telegraf');
 
 const BOTS_PATH = path.join(__dirname, 'bots.json');
 
-// حداکثر تعداد ربات کمکی که روی یک پیام واحد اجازه دارن ری‌اکشن بزنن
-const MAX_CONCURRENT_HELPERS = 3;
+// حداکثر تعداد ربات کمکی که روی یک پیام واحد اجازه دارن ری‌اکشن بزنن.
+// null یعنی بدون سقف — همه‌ی ربات‌های فعال روی هر پیام ری‌اکشن می‌زنن.
+// ⚠️ توجه: بدون سقف یعنی با تعداد زیاد ربات، رفتار روی یک پیام می‌تونه
+// غیرطبیعی به نظر برسه و ریسک تشخیص اسپم توسط تلگرام بالاتر می‌ره.
+const DEFAULT_MAX_CONCURRENT_HELPERS = null;
 // بازه تاخیر تصادفی بین ری‌اکشن هر ربات کمکی (میلی‌ثانیه)
 const MIN_DELAY_MS = 400;
 const MAX_DELAY_MS = 2500;
+
 
 function loadBotsFile() {
   try {
@@ -54,10 +58,15 @@ function saveBotsFile(data) {
  * روی این نمونه‌ها لازم نیست چون فقط قراره ری‌اکشن بزنن، نه پیام بخونن.
  */
 class HelperBotManager {
-  constructor() {
+  constructor(maxConcurrent = DEFAULT_MAX_CONCURRENT_HELPERS) {
     this.data = loadBotsFile();
     this.instances = new Map(); // id -> { telegraf, meta }
+    this.maxConcurrent = maxConcurrent; // null = بدون سقف
     this._bootstrapInstances();
+  }
+
+  setMaxConcurrent(n) {
+    this.maxConcurrent = n === null || n === 0 ? null : Number(n);
   }
 
   _bootstrapInstances() {
@@ -166,17 +175,18 @@ class HelperBotManager {
   }
 
   /**
-   * چند ربات کمکی فعال (حداکثر MAX_CONCURRENT_HELPERS تا) رو با تاخیر
-   * تصادفی روی یک پیام ری‌اکشن می‌زنه. emojiPool لیست ایموجی‌های
-   * ممکنه؛ هر ربات یکی رو تصادفی انتخاب می‌کنه.
+   * همه‌ی ربات‌های کمکی فعال (یا تا سقف this.maxConcurrent در صورت تنظیم)
+   * رو با تاخیر تصادفی روی یک پیام ری‌اکشن می‌زنه. emojiPool لیست
+   * ایموجی‌های ممکنه؛ هر ربات یکی رو تصادفی انتخاب می‌کنه.
    */
   async reactOnMessage(chatId, messageId, emojiPool) {
     const active = this.enabledBots();
     if (active.length === 0) return;
 
-    // انتخاب تصادفی زیرمجموعه‌ای از ربات‌ها تا سقف مجاز
+    // اگر سقفی تنظیم شده، یک زیرمجموعه‌ی تصادفی انتخاب می‌کنیم؛
+    // وگرنه همه‌ی ربات‌های فعال شرکت می‌کنند.
     const shuffled = [...active].sort(() => Math.random() - 0.5);
-    const chosen = shuffled.slice(0, MAX_CONCURRENT_HELPERS);
+    const chosen = this.maxConcurrent ? shuffled.slice(0, this.maxConcurrent) : shuffled;
 
     for (const meta of chosen) {
       const delay = MIN_DELAY_MS + Math.random() * (MAX_DELAY_MS - MIN_DELAY_MS);
@@ -189,4 +199,4 @@ class HelperBotManager {
   }
 }
 
-module.exports = { HelperBotManager, MAX_CONCURRENT_HELPERS };
+module.exports = { HelperBotManager, DEFAULT_MAX_CONCURRENT_HELPERS };
