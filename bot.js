@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 require('dotenv').config();
-const { HelperBotManager, MAX_CONCURRENT_HELPERS } = require('./helper-bots');
+const { HelperBotManager } = require('./helper-bots');
 
 // ==================== مسیرها ====================
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -42,6 +42,7 @@ const DEFAULT_CONFIG = {
   },
   reactChannelPosts: true,
   useHelperBots: true, // آیا ربات‌های کمکی هم روی پیام‌ها ری‌اکشن بزنند
+  helperMaxConcurrent: null, // null = بدون سقف؛ عدد = حداکثر ربات کمکی هم‌زمان روی هر پیام
 };
 
 // ==================== مدیریت Config پایدار ====================
@@ -168,7 +169,7 @@ if (envAdminIds.length === 0) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
-const helperBots = new HelperBotManager();
+const helperBots = new HelperBotManager(config.helperMaxConcurrent);
 
 const SAFE_FALLBACK_EMOJI = '👍';
 
@@ -241,32 +242,36 @@ function statusText() {
     `ری‌اکشن به کانال: ${config.reactChannelPosts ? '✅ فعال' : '❌ غیرفعال'}\n` +
     `Rate limit: ${config.rateLimit.maxPerWindow} ری‌اکشن هر ${config.rateLimit.windowMs / 1000} ثانیه\n` +
     `کاربران مستثنی: ${config.ignoreUsers.length} نفر\n` +
-    `ربات‌های کمکی: ${config.useHelperBots ? '✅ فعال' : '❌ غیرفعال'} (${helperBots.enabledBots().length}/${helperBots.list().length} فعال)`
+    `ربات‌های کمکی: ${config.useHelperBots ? '✅ فعال' : '❌ غیرفعال'} (${helperBots.enabledBots().length}/${helperBots.list().length} فعال، سقف: ${helperBots.maxConcurrent ? helperBots.maxConcurrent : 'بدون سقف'})`
   );
 }
 
 function mainMenuKeyboard() {
   return Markup.inlineKeyboard([
     [
-      Markup.button.callback(config.enabled ? '⏸ غیرفعال کردن ربات' : '▶️ فعال کردن ربات', 'toggle_enabled'),
+      Markup.button.callback(
+        config.enabled ? '🔴 غیرفعال کردن ربات' : '🟢 فعال کردن ربات',
+        'toggle_enabled'
+      ),
     ],
     [
       Markup.button.callback(
-        config.reactChannelPosts ? '📴 خاموش کردن ری‌اکشن کانال' : '📡 روشن کردن ری‌اکشن کانال',
+        config.reactChannelPosts ? '🟠 خاموش کردن ری‌اکشن کانال' : '🔵 روشن کردن ری‌اکشن کانال',
         'toggle_channel'
       ),
     ],
     [
-      Markup.button.callback('⏱ تنظیم Rate Limit', 'set_ratelimit'),
-      Markup.button.callback('🚫 لیست مستثنی‌ها', 'ignore_list'),
+      Markup.button.callback('🟣 تنظیم Rate Limit', 'set_ratelimit'),
+      Markup.button.callback('🟡 لیست مستثنی‌ها', 'ignore_list'),
     ],
     [
       Markup.button.callback(
-        config.useHelperBots ? '🤖 خاموش کردن ربات‌های کمکی' : '🤖 روشن کردن ربات‌های کمکی',
+        config.useHelperBots ? '🟤 خاموش کردن ربات‌های کمکی' : '🟢 روشن کردن ربات‌های کمکی',
         'toggle_helpers'
       ),
-      Markup.button.callback('📋 لیست ربات‌های کمکی', 'bots_list'),
+      Markup.button.callback('🔷 لیست ربات‌های کمکی', 'bots_list'),
     ],
+    [Markup.button.callback('⚪️ تنظیم سقف ربات‌های کمکی', 'set_helpercap')],
     [Markup.button.callback('🔄 بروزرسانی وضعیت', 'refresh_status')],
   ]);
 }
@@ -300,6 +305,54 @@ function requireAdminCtx(ctx) {
   return true;
 }
 
+// ==================== پشتیبانی از دستورات در پست‌های کانال ====================
+// bot.command() در Telegraf فقط روی آپدیت‌های نوع «message» کار می‌کند.
+// وقتی خودِ ادمین مستقیماً در کانال یک دستور (/panel ,/bots و ...) می‌فرستد،
+// تلگرام آن را به شکل «channel_post» تحویل می‌دهد، نه «message» — پس
+// bot.command() هرگز آن را نمی‌بیند و فقط هندلر عمومی channel_post
+// (که فقط ری‌اکشن می‌زند) اجرا می‌شود. این میان‌افزار قبل از هر چیز
+// دستورهای متنی داخل channel_post را تشخیص می‌دهد و به همان تابع
+// dispatch می‌کند که برای message استفاده می‌شود.
+const channelCommandHandlers = new Map();
+
+function registerChannelCommand(name, handler) {
+  channelCommandHandlers.set(name, handler);
+}
+
+bot.on('channel_post', async (ctx, next) => {
+  const text = ctx.channelPost.text || '';
+  if (!text.startsWith('/')) return next();
+
+  const match = text.match(/^\/([a-zA-Z0-9_]+)(?:@\S+)?(?:\s+(.*))?$/s);
+  if (!match) return next();
+
+  const [, cmdName, args] = match;
+  const handler = channelCommandHandlers.get(cmdName);
+  if (!handler) return next(); // دستور ناشناخته در کانال؛ به بقیه هندلرها بسپار
+
+  // نکته مهم: تلگرام در آپدیت‌های channel_post معمولاً ctx.from را پر
+  // نمی‌کند (پست از طرف «هویت کانال» است، نه اکانت شخصی) — پس تشخیص
+  // ادمین بر مبنای userId اینجا کار نمی‌کند، حتی اگر خودِ ادمین فرستاده
+  // باشد. برای دستورات مدیریتی، به‌جای تلاش نافرجام، پیام راهنما بده.
+  if (!ctx.from?.id) {
+    await ctx.reply(
+      '⚠️ دستورات مدیریتی را نمی‌توان مستقیماً داخل خودِ کانال اجرا کرد ' +
+        '(تلگرام هویت فرستنده را در پست‌های کانال نشان نمی‌دهد).\n' +
+        'لطفاً همین دستور را در چت خصوصی با ربات بفرستید.'
+    );
+    return; // next() صدا زده نمی‌شود تا ری‌اکشن هم نخورد
+  }
+
+  ctx.message = { text, message_id: ctx.channelPost.message_id };
+  try {
+    await handler(ctx, args || '');
+  } catch (err) {
+    console.error(`❌ خطا در اجرای دستور کانال /${cmdName}:`, err.message);
+  }
+  // عمداً next() صدا زده نمی‌شود تا هندلر عمومی channel_post (ری‌اکشن) روی
+  // خود دستور اجرا نشود.
+});
+
 // ==================== دستورات (باید قبل از bot.on('message') ثبت شوند) ====================
 
 bot.command('start', async (ctx) => {
@@ -320,8 +373,14 @@ bot.command('myid', async (ctx) => {
 bot.command('ping', async (ctx) => {
   await ctx.reply('pong ✅');
 });
+registerChannelCommand('ping', async (ctx) => {
+  await ctx.reply('pong ✅ (از کانال)');
+});
 
 bot.command('status', async (ctx) => {
+  await ctx.reply(statusText(), { parse_mode: 'Markdown' });
+});
+registerChannelCommand('status', async (ctx) => {
   await ctx.reply(statusText(), { parse_mode: 'Markdown' });
 });
 
@@ -332,9 +391,22 @@ bot.command('panel', async (ctx) => {
   }
   await sendAdminPanel(ctx);
 });
+registerChannelCommand('panel', async (ctx) => {
+  if (!requireAdminCtx(ctx)) {
+    return ctx.reply('⛔️ این دستور فقط برای ادمین در دسترس است.');
+  }
+  await sendAdminPanel(ctx);
+});
 
-// افزودن/حذف کاربر مستثنی هنوز از طریق دستور متنی (برای وارد کردن آی‌دی دلخواه)
-bot.command('ignore', async (ctx) => {
+// تابع کمکی: یک هندلر را هم برای پیام معمولی (bot.command) و هم برای
+// دستور داخل پست کانال (registerChannelCommand) با یک تعریف واحد ثبت می‌کند.
+function dualCommand(name, handler) {
+  bot.command(name, handler);
+  registerChannelCommand(name, handler);
+}
+
+// افزودن/حذف کاربر مستثنی
+dualCommand('ignore', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
   const parts = ctx.message.text.split(/\s+/);
   const targetId = Number(parts[1]);
@@ -346,7 +418,7 @@ bot.command('ignore', async (ctx) => {
   await ctx.reply(`✅ کاربر ${targetId} به لیست مستثنی اضافه شد.`);
 });
 
-bot.command('unignore', async (ctx) => {
+dualCommand('unignore', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
   const parts = ctx.message.text.split(/\s+/);
   const targetId = Number(parts[1]);
@@ -358,7 +430,7 @@ bot.command('unignore', async (ctx) => {
 
 // ==================== ربات‌های کمکی ====================
 
-bot.command('addbot', async (ctx) => {
+dualCommand('addbot', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
   const parts = ctx.message.text.trim().split(/\s+/);
   const token = parts[1];
@@ -381,7 +453,7 @@ bot.command('addbot', async (ctx) => {
   }
 });
 
-bot.command('bots', async (ctx) => {
+dualCommand('bots', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
   const list = helperBots.list();
   if (list.length === 0) {
@@ -390,15 +462,16 @@ bot.command('bots', async (ctx) => {
   const lines = list.map(
     (b) => `${b.enabled ? '🟢' : '⚪️'} ${b.label} — id: \`${b.id}\``
   );
+  const capText = helperBots.maxConcurrent ? `حداکثر ${helperBots.maxConcurrent} تا هم‌زمان` : 'بدون سقف (همه‌ی فعال‌ها)';
   await ctx.reply(
-    `🤖 *ربات‌های کمکی* (${list.length} عدد، حداکثر ${MAX_CONCURRENT_HELPERS} تا هم‌زمان روی هر پیام):\n\n` +
+    `🤖 *ربات‌های کمکی* (${list.length} عدد، ${capText} روی هر پیام):\n\n` +
       lines.join('\n') +
-      '\n\nبرای حذف: /removebot <id>\nحالت کلی ربات‌های کمکی: /togglehelpers',
+      '\n\nبرای حذف: /removebot <id>\nحالت کلی ربات‌های کمکی: /togglehelpers\nتنظیم سقف: /sethelpercap <عدد یا 0 برای بدون‌سقف>',
     { parse_mode: 'Markdown' }
   );
 });
 
-bot.command('removebot', async (ctx) => {
+dualCommand('removebot', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
   const parts = ctx.message.text.trim().split(/\s+/);
   const id = parts[1];
@@ -408,12 +481,32 @@ bot.command('removebot', async (ctx) => {
   await ctx.reply(removed ? `✅ ربات ${id} حذف شد.` : `❌ رباتی با آی‌دی ${id} پیدا نشد.`);
 });
 
-bot.command('togglehelpers', async (ctx) => {
+dualCommand('togglehelpers', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
   config.useHelperBots = !config.useHelperBots;
   saveConfig(config);
   await ctx.reply(
     `ری‌اکشن ربات‌های کمکی ${config.useHelperBots ? '✅ فعال' : '❌ غیرفعال'} شد.`
+  );
+});
+
+dualCommand('sethelpercap', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  const parts = ctx.message.text.trim().split(/\s+/);
+  const raw = parts[1];
+  if (raw === undefined) {
+    return ctx.reply('استفاده صحیح: /sethelpercap <عدد>  (یا 0 برای بدون‌سقف)');
+  }
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) {
+    return ctx.reply('عدد نامعتبر است. مثال: /sethelpercap 5  یا  /sethelpercap 0');
+  }
+  const capValue = n === 0 ? null : n;
+  config.helperMaxConcurrent = capValue;
+  saveConfig(config);
+  helperBots.setMaxConcurrent(capValue);
+  await ctx.reply(
+    capValue ? `✅ سقف تنظیم شد: حداکثر ${capValue} ربات کمکی هم‌زمان روی هر پیام.` : '✅ سقف برداشته شد — همه‌ی ربات‌های فعال روی هر پیام ری‌اکشن می‌زنند.'
   );
 });
 
@@ -460,6 +553,37 @@ bot.action('bots_list', async (ctx) => {
         list.map((b) => `${b.enabled ? '🟢' : '⚪️'} ${b.label} — id: \`${b.id}\``).join('\n') +
         '\n\nحذف: `/removebot <id>`';
   await ctx.reply(text, { parse_mode: 'Markdown' });
+});
+
+bot.action('set_helpercap', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  await ctx.answerCbQuery();
+  await ctx.reply(
+    `⚪️ سقف فعلی: ${helperBots.maxConcurrent ? helperBots.maxConcurrent + ' ربات هم‌زمان' : 'بدون سقف'}\n\nیک گزینه انتخاب کن:`,
+    Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔹 ۲ ربات', 'hc_2'),
+        Markup.button.callback('🔸 ۵ ربات', 'hc_5'),
+      ],
+      [
+        Markup.button.callback('🔶 ۱۰ ربات', 'hc_10'),
+        Markup.button.callback('⭐️ بدون سقف', 'hc_0'),
+      ],
+      [Markup.button.callback('« بازگشت به پنل', 'refresh_status')],
+    ])
+  );
+});
+
+bot.action(/^hc_(\d+)$/, async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  const n = Number(ctx.match[1]);
+  const capValue = n === 0 ? null : n;
+  config.helperMaxConcurrent = capValue;
+  saveConfig(config);
+  helperBots.setMaxConcurrent(capValue);
+  await ctx.answerCbQuery(capValue ? `✅ سقف: ${capValue} ربات` : '✅ بدون سقف');
+  await ctx.deleteMessage().catch(() => {});
+  await sendAdminPanel(ctx);
 });
 
 bot.action('ignore_list', async (ctx) => {
@@ -552,7 +676,7 @@ console.log('🤖 ربات شروع شد!');
 console.log(`   حالت: ${config.enabled ? 'فعال' : 'غیرفعال'}`);
 console.log(`   ری‌اکشن به کانال: ${config.reactChannelPosts ? 'فعال' : 'غیرفعال'}`);
 console.log(`   ادمین‌ها: ${envAdminIds.length > 0 ? envAdminIds.join(', ') : '(تنظیم نشده)'}`);
-console.log(`   ربات‌های کمکی: ${helperBots.list().length} عدد (حداکثر ${MAX_CONCURRENT_HELPERS} هم‌زمان)`);
+console.log(`   ربات‌های کمکی: ${helperBots.list().length} عدد (${helperBots.maxConcurrent ? 'حداکثر ' + helperBots.maxConcurrent + ' هم‌زمان' : 'بدون سقف'})`);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
