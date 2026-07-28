@@ -19,6 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const { Telegraf, Markup } = require('telegraf');
 require('dotenv').config();
+const { HelperBotManager, MAX_CONCURRENT_HELPERS } = require('./helper-bots');
 
 // ==================== مسیرها ====================
 const CONFIG_PATH = path.join(__dirname, 'config.json');
@@ -40,6 +41,7 @@ const DEFAULT_CONFIG = {
     maxPerWindow: 5,
   },
   reactChannelPosts: true,
+  useHelperBots: true, // آیا ربات‌های کمکی هم روی پیام‌ها ری‌اکشن بزنند
 };
 
 // ==================== مدیریت Config پایدار ====================
@@ -166,6 +168,7 @@ if (envAdminIds.length === 0) {
 }
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
+const helperBots = new HelperBotManager();
 
 const SAFE_FALLBACK_EMOJI = '👍';
 
@@ -220,6 +223,14 @@ async function handleReactable(ctx, message, fromId, fromLabel) {
   if (ok) {
     console.log(`✅ ${fromLabel} | دسته: ${category} | ری‌اکشن: ${emoji}`);
   }
+
+  // ری‌اکشن ربات‌های کمکی (در صورت فعال بودن) — با تاخیر تصادفی و مستقل
+  if (config.useHelperBots && helperBots.enabledBots().length > 0) {
+    const emojiPool = reactions[category] || reactions.default;
+    const chatId = ctx.chat.id;
+    const messageId = message.message_id;
+    helperBots.reactOnMessage(chatId, messageId, emojiPool);
+  }
 }
 
 // ==================== پنل مدیریت شیشه‌ای ====================
@@ -229,7 +240,8 @@ function statusText() {
     `فعال بودن: ${config.enabled ? '✅ فعال' : '❌ غیرفعال'}\n` +
     `ری‌اکشن به کانال: ${config.reactChannelPosts ? '✅ فعال' : '❌ غیرفعال'}\n` +
     `Rate limit: ${config.rateLimit.maxPerWindow} ری‌اکشن هر ${config.rateLimit.windowMs / 1000} ثانیه\n` +
-    `کاربران مستثنی: ${config.ignoreUsers.length} نفر`
+    `کاربران مستثنی: ${config.ignoreUsers.length} نفر\n` +
+    `ربات‌های کمکی: ${config.useHelperBots ? '✅ فعال' : '❌ غیرفعال'} (${helperBots.enabledBots().length}/${helperBots.list().length} فعال)`
   );
 }
 
@@ -247,6 +259,13 @@ function mainMenuKeyboard() {
     [
       Markup.button.callback('⏱ تنظیم Rate Limit', 'set_ratelimit'),
       Markup.button.callback('🚫 لیست مستثنی‌ها', 'ignore_list'),
+    ],
+    [
+      Markup.button.callback(
+        config.useHelperBots ? '🤖 خاموش کردن ربات‌های کمکی' : '🤖 روشن کردن ربات‌های کمکی',
+        'toggle_helpers'
+      ),
+      Markup.button.callback('📋 لیست ربات‌های کمکی', 'bots_list'),
     ],
     [Markup.button.callback('🔄 بروزرسانی وضعیت', 'refresh_status')],
   ]);
@@ -330,6 +349,67 @@ bot.command('unignore', async (ctx) => {
   await ctx.reply(`✅ کاربر ${targetId} از لیست مستثنی حذف شد.`);
 });
 
+// ==================== ربات‌های کمکی ====================
+
+bot.command('addbot', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  const parts = ctx.message.text.trim().split(/\s+/);
+  const token = parts[1];
+  if (!token) {
+    return ctx.reply('استفاده صحیح: /addbot <token>\n(توکن را از @BotFather بگیرید)');
+  }
+
+  // حذف پیام حاوی توکن برای امنیت بیشتر (در گروه/کانال باقی نماند)
+  ctx.deleteMessage().catch(() => {});
+
+  try {
+    const meta = await helperBots.addBot(token);
+    await ctx.reply(
+      `✅ ربات کمکی اضافه شد: ${meta.label} (id: ${meta.id})\n\n` +
+        '⚠️ یادت نره این ربات رو هم باید در کانال/گروه *ادمین* کنی تا بتونه ری‌اکشن بزنه.',
+      { parse_mode: 'Markdown' }
+    );
+  } catch (err) {
+    await ctx.reply(`❌ خطا: ${err.message}`);
+  }
+});
+
+bot.command('bots', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  const list = helperBots.list();
+  if (list.length === 0) {
+    return ctx.reply('هیچ ربات کمکی‌ای اضافه نشده است.\nبرای افزودن: /addbot <token>');
+  }
+  const lines = list.map(
+    (b) => `${b.enabled ? '🟢' : '⚪️'} ${b.label} — id: \`${b.id}\``
+  );
+  await ctx.reply(
+    `🤖 *ربات‌های کمکی* (${list.length} عدد، حداکثر ${MAX_CONCURRENT_HELPERS} تا هم‌زمان روی هر پیام):\n\n` +
+      lines.join('\n') +
+      '\n\nبرای حذف: /removebot <id>\nحالت کلی ربات‌های کمکی: /togglehelpers',
+    { parse_mode: 'Markdown' }
+  );
+});
+
+bot.command('removebot', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  const parts = ctx.message.text.trim().split(/\s+/);
+  const id = parts[1];
+  if (!id) return ctx.reply('استفاده صحیح: /removebot <id>');
+
+  const removed = helperBots.removeBot(id);
+  await ctx.reply(removed ? `✅ ربات ${id} حذف شد.` : `❌ رباتی با آی‌دی ${id} پیدا نشد.`);
+});
+
+bot.command('togglehelpers', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.reply('⛔️ فقط ادمین.');
+  config.useHelperBots = !config.useHelperBots;
+  saveConfig(config);
+  await ctx.reply(
+    `ری‌اکشن ربات‌های کمکی ${config.useHelperBots ? '✅ فعال' : '❌ غیرفعال'} شد.`
+  );
+});
+
 // ==================== اکشن‌های دکمه‌های شیشه‌ای ====================
 
 bot.action('toggle_enabled', async (ctx) => {
@@ -352,6 +432,27 @@ bot.action('refresh_status', async (ctx) => {
   if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
   await ctx.answerCbQuery('🔄 بروز شد');
   await editAdminPanel(ctx);
+});
+
+bot.action('toggle_helpers', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  config.useHelperBots = !config.useHelperBots;
+  saveConfig(config);
+  await ctx.answerCbQuery(config.useHelperBots ? '🤖 روشن شد' : '🤖 خاموش شد');
+  await editAdminPanel(ctx);
+});
+
+bot.action('bots_list', async (ctx) => {
+  if (!requireAdminCtx(ctx)) return ctx.answerCbQuery('⛔️ فقط ادمین.', { show_alert: true });
+  await ctx.answerCbQuery();
+  const list = helperBots.list();
+  const text =
+    list.length === 0
+      ? '🤖 هیچ ربات کمکی‌ای اضافه نشده است.\n\nبرای افزودن: `/addbot <token>`'
+      : `🤖 *ربات‌های کمکی* (${list.length} عدد):\n\n` +
+        list.map((b) => `${b.enabled ? '🟢' : '⚪️'} ${b.label} — id: \`${b.id}\``).join('\n') +
+        '\n\nحذف: `/removebot <id>`';
+  await ctx.reply(text, { parse_mode: 'Markdown' });
 });
 
 bot.action('ignore_list', async (ctx) => {
@@ -431,6 +532,7 @@ console.log('🤖 ربات شروع شد!');
 console.log(`   حالت: ${config.enabled ? 'فعال' : 'غیرفعال'}`);
 console.log(`   ری‌اکشن به کانال: ${config.reactChannelPosts ? 'فعال' : 'غیرفعال'}`);
 console.log(`   ادمین‌ها: ${envAdminIds.length > 0 ? envAdminIds.join(', ') : '(تنظیم نشده)'}`);
+console.log(`   ربات‌های کمکی: ${helperBots.list().length} عدد (حداکثر ${MAX_CONCURRENT_HELPERS} هم‌زمان)`);
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
